@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#3182f6">
+<title>안심길 · 지도로 보기</title>
+<!-- 지도 라이브러리 Leaflet (키·가입 필요 없음) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; color: #191f28; background: #f2f4f6; }
+  .wrap { display: flex; flex-direction: column; height: 100%; }
+  header { padding: 16px 20px 12px; background: #fff; border-bottom: 1px solid #e5e8eb; }
+  header .tag { font-size: 15px; font-weight: 700; color: #3182f6; margin: 0 0 2px; }
+  header h1 { font-size: 24px; margin: 0; }
+  #status { margin: 8px 0 0; font-size: 18px; line-height: 1.45; color: #4e5968; }
+  #status.ok { color: #1b64da; }
+  #status.err { color: #d22030; }
+  .acc { font-size: 15px; color: #8b95a1; margin: 4px 0 0; }
+  #map { flex: 1; min-height: 320px; }
+  .bar { display: flex; gap: 10px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: #fff; border-top: 1px solid #e5e8eb; }
+  .btn { flex: 1; min-height: 60px; border: 0; border-radius: 14px; font-size: 20px; font-weight: 700; cursor: pointer; }
+  .btn.pri { background: #3182f6; color: #fff; }
+  .btn.sec { background: #e8f3ff; color: #1b64da; }
+  .btn:disabled { opacity: .5; }
+  /* 내 위치 파란 점 */
+  .me-dot { width: 24px; height: 24px; border-radius: 50%; background: #3182f6; border: 4px solid #fff; box-shadow: 0 0 0 8px rgba(49,130,246,.25), 0 1px 4px rgba(0,0,0,.3); }
+  .leaflet-control-zoom a { width: 44px !important; height: 44px !important; line-height: 44px !important; font-size: 24px !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="tag">안심길 부산 대중교통</p>
+    <h1>지금 내 위치</h1>
+    <p id="status">위치를 찾고 있어요…</p>
+    <p class="acc" id="acc"></p>
+  </header>
+  <div id="map" role="application" aria-label="내 위치가 표시된 지도"></div>
+  <div class="bar">
+    <button class="btn pri" id="meBtn">내 위치로</button>
+    <button class="btn sec" id="followBtn" aria-pressed="true">따라가기 켜짐</button>
+  </div>
+</div>
+
+<script>
+const DEFAULT_CENTER = [35.1796, 129.0756]; // 부산시청 (위치를 못 받을 때 보여 줄 곳)
+
+const $status = document.getElementById('status');
+const $acc = document.getElementById('acc');
+const $meBtn = document.getElementById('meBtn');
+const $followBtn = document.getElementById('followBtn');
+let map, meMarker, accCircle, lastPos = null, follow = true, watchId = null;
+
+function setStatus(text, kind) { $status.textContent = text; $status.className = kind || ''; }
+function fail(msg) { setStatus(msg, 'err'); $meBtn.disabled = true; $followBtn.disabled = true; }
+
+function showPosition(pos) {
+  const { latitude, longitude, accuracy } = pos.coords;
+  const ll = [latitude, longitude];
+  lastPos = ll;
+  if (!meMarker) {
+    accCircle = L.circle(ll, { radius: accuracy, color: '#3182f6', weight: 1, opacity: 0.5, fillColor: '#3182f6', fillOpacity: 0.12, interactive: false }).addTo(map);
+    meMarker = L.marker(ll, { icon: L.divIcon({ className: '', html: '<div class="me-dot"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }), title: '내 위치', keyboard: false, zIndexOffset: 1000 }).addTo(map);
+    map.setView(ll, 17);
+  } else {
+    meMarker.setLatLng(ll);
+    accCircle.setLatLng(ll);
+    accCircle.setRadius(accuracy);
+    if (follow) map.panTo(ll);
+  }
+  setStatus('파란 점이 지금 계신 곳이에요.', 'ok');
+  $acc.textContent = '위치 오차 약 ' + Math.round(accuracy) + 'm · ' + new Date(pos.timestamp).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) + ' 기준';
+}
+
+function showError(err) {
+  const msg = {
+    1: '위치 사용을 허락해 주셔야 내 위치를 보여 드릴 수 있어요. 휴대폰 설정에서 브라우저의 위치 권한을 켜 주세요.',
+    2: '지금은 위치를 찾을 수 없어요. 밖으로 나가시거나 잠시 후 다시 눌러 주세요.',
+    3: '위치를 찾는 데 시간이 오래 걸려요. "내 위치로"를 다시 눌러 주세요.',
+  }[err.code] || '위치를 찾지 못했어요.';
+  setStatus(msg, 'err');
+}
+
+function startWatch() {
+  if (!('geolocation' in navigator)) { setStatus('이 휴대폰에서는 위치 기능을 쓸 수 없어요.', 'err'); return; }
+  if (!window.isSecureContext) { setStatus('위치는 https 주소에서만 쓸 수 있어요. 배포된 주소로 열어 주세요.', 'err'); return; }
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  setStatus('위치를 찾고 있어요…');
+  watchId = navigator.geolocation.watchPosition(showPosition, showError, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
+}
+
+function updateFollowBtn() {
+  $followBtn.textContent = follow ? '따라가기 켜짐' : '따라가기 꺼짐';
+  $followBtn.setAttribute('aria-pressed', String(follow));
+}
+$meBtn.addEventListener('click', () => {
+  follow = true; updateFollowBtn();
+  if (lastPos) map.setView(lastPos, 17); else startWatch();
+});
+$followBtn.addEventListener('click', () => { follow = !follow; updateFollowBtn(); if (follow && lastPos) map.panTo(lastPos); });
+
+if (!window.L) {
+  fail('지도를 불러오지 못했어요. 인터넷 연결을 확인하고 다시 열어 주세요.');
+} else {
+  map = L.map('map', { zoomControl: false }).setView(DEFAULT_CENTER, 13);
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> 기여자',
+  }).addTo(map);
+  // 손가락으로 지도를 움직이면 따라가기를 잠시 끔
+  map.on('dragstart', () => { follow = false; updateFollowBtn(); });
+  startWatch();
+}
+</script>
+</body>
+</html>
